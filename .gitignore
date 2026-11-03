@@ -2,6 +2,11 @@
 /data/
 telco.csv
 
+# Generated reports (keep directory placeholders)
+/reports/**
+!/reports/**/
+!/reports/**/.gitkeep
+
 # Mac OS-specific storage files
 .DS_Store
 
@@ -187,6 +192,7 @@ cython_debug/
 
 # Ruff stuff:
 .ruff_cache/
+.uv-cache/
 
 # PyPI configuration file
 .pypirc

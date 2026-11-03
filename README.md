@@ -102,3 +102,40 @@ missing and blank-value counts, source hash, and Python/pandas versions.
 
 The raw CSV and local environment are excluded from Git.
 
+## TP02 milestone 1: first model
+
+Install the locked environment as above, then run:
+
+```powershell
+uv run python -m telco_churn.scripts.first_model
+```
+
+The script uses only `tenure` and `MonthlyCharges` to train logistic regression
+and a `DummyClassifier(strategy="most_frequent")`. Both fit on training data.
+`customerID` identifies customers and checks split separation; `Churn` is the
+target, with **Yes = 1 (positive)** and No = 0. Neither is an input feature.
+
+Two stratified splits with seed 42 allocate 4,225 training, 1,409 validation
+and 1,409 test customers (approximately 60/20/20). The script saves customer
+allocations in `reports/customer_splits.csv` for reuse in later milestones.
+Keep the source CSV, seed and allocations fixed. The test set is reserved;
+only validation results may guide model selection.
+
+Validation results on the original CSV:
+
+| Model | Accuracy | Actual No: predicted No / Yes | Actual Yes: predicted No / Yes |
+|---|---:|---|---|
+| Majority baseline | 0.7346 | 1035 / 0 | 374 / 0 |
+| Logistic regression | 0.7828 | 950 / 85 | 221 / 153 |
+
+Confusion matrices use actual classes as rows and predicted classes as columns,
+both ordered `[No (0), Yes (1)]`. Always predicting No reaches 73.46% accuracy
+while missing every churner. The learned model catches 153 of 374 churners,
+so accuracy alone is insufficient to describe its usefulness.
+
+`reports/first_model_metrics.json` records accuracy, labeled confusion matrices,
+seed and split sizes. `reports/first_model_validation_predictions.csv`
+contains customer IDs, actual labels and both models' validation predictions.
+The original CSV remains unchanged. This milestone requires complete numeric
+values in its two inputs; preprocessing and the larger feature set come next.
+
