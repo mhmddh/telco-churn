@@ -59,3 +59,46 @@ A short description of the project.
 
 --------
 
+
+## Setup and data inspection
+
+This project inspects a telecom customer snapshot before building a model
+to predict customer churn.
+
+### Install the environment
+
+Install Python 3.12 and uv, then run from the project directory:
+
+```powershell
+uv sync --locked
+```
+
+### Obtain the dataset
+
+Download the [original CSV](https://raw.githubusercontent.com/IBM/telco-customer-churn-on-icp4d/1fd6fd70906479be1712e64cfc0ea89f58466629/data/Telco-Customer-Churn.csv)
+and save it as `data/raw/telco.csv`. Keep the original file unchanged.
+
+Expected SHA-256:
+
+```text
+16320c9c1ec72448db59aa0a26a0b95401046bef5d02fd3aeb906448e3055e91
+```
+
+Verify the local file:
+
+```powershell
+uv run python -m telco_churn.scripts.hash_data
+```
+
+### Run the inspection
+
+```powershell
+uv run python -m telco_churn.scripts.inspect_data
+```
+
+The script saves `reports/data_overview.json`, containing dataset dimensions,
+column types, target counts and proportions, duplicate customer-ID count,
+missing and blank-value counts, source hash, and Python/pandas versions.
+
+The raw CSV and local environment are excluded from Git.
+
