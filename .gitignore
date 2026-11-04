@@ -1,6 +1,7 @@
 # Data
 /data/
 telco.csv
+/models/selected_pipeline/
 
 # Generated reports (keep directory placeholders)
 /reports/**

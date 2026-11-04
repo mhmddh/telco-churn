@@ -226,3 +226,50 @@ Generated files under `reports/` (ignored by Git):
 
 This milestone compares candidates; saving the fitted pipeline belongs to part 4.
 
+## TP02 milestone 4: save and reload the fitted pipeline
+
+Run the comparison, save its fitted winner, and verify inference in a fresh process:
+
+```powershell
+uv run python -m telco_churn.scripts.train_pipeline --save
+```
+
+This reuses the part 1 customer allocations and fits candidates only on training
+data. Validation selects the winner; it is saved directly, without refitting on
+validation or evaluating test. The artifact contains fitted imputers, scaler,
+encoder and classifier together. Building a pipeline returns an unfitted object;
+fitting it changes its state.
+
+The generated bundle is `models/selected_pipeline/` (ignored by Git):
+
+- `pipeline.joblib`: complete fitted prediction pipeline.
+- `metadata.json`: source and artifact SHA-256, customer allocations, seed,
+  feature roles and parsing policy, preprocessing settings, model parameters,
+  validation metrics, selection rule, positive class and threshold, Python/library
+  versions and hashes of source code, project configuration and lockfile.
+- `customer_splits.csv`: copy of the customer allocations.
+- `example_customers.csv`: five validation examples with six features and no labels.
+- `original_predictions.csv` and `reloaded_predictions.csv`: reload evidence.
+
+Predict in a separate process using only the artifact and an input feature CSV:
+
+```powershell
+uv run python -m telco_churn.scripts.predict_pipeline --artifact models/selected_pipeline/pipeline.joblib --input models/selected_pipeline/example_customers.csv --output reports/new_predictions.csv
+```
+
+The inference command does not train, access the original training CSV or require
+labels. It applies the shared `parse_features` rules, then calls the loaded
+pipeline. Provide all six original columns in the part 2 schema: numeric columns
+accept numbers or numeric text and supported missing values; categorical columns
+accept text or missing values. Malformed numeric text and absent required columns
+fail visibly. Output contains class-1 probabilities (`score`) and predictions
+using threshold 0.5 (`predicted`).
+
+The save command checks that original and reloaded class predictions are identical
+and probability differences are at most `1e-12` (absolute tolerance; relative
+tolerance zero). The check uses the same examples after CSV round-tripping and
+records its outcome in metadata. Only load trusted joblib files, which can execute
+code when loaded. Recreate the recorded environment with `uv sync --locked`;
+loading across library versions is not guaranteed to work. Keep the bundle intact
+when sharing it through the course's artifact submission location.
+

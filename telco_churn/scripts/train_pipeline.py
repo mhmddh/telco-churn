@@ -1,4 +1,4 @@
-"""TP02 milestone 2: six-feature preprocessing and classifier in one sklearn Pipeline."""
+"""TP02 milestones 2-4: train, compare and save complete sklearn pipelines."""
 
 import argparse
 import json
@@ -110,6 +110,7 @@ def compare_models(X_train, y_train, X_valid, y_valid, customer_ids, report_dir)
         ),
     }
     results = []
+    fitted = {}
     predictions = pd.DataFrame({"customerID": customer_ids, "actual": y_valid})
     for name, classifier in models.items():
         # Each candidate owns a fresh preprocessor; no fitted state is shared.
@@ -117,6 +118,7 @@ def compare_models(X_train, y_train, X_valid, y_valid, customer_ids, report_dir)
         start = perf_counter()
         candidate.fit(X_train, y_train)
         fit_seconds = perf_counter() - start
+        fitted[name] = candidate
         metrics, scores, predicted = evaluate_model(candidate, X_valid, y_valid)
         results.append({
             "model": name,
@@ -168,12 +170,11 @@ def compare_models(X_train, y_train, X_valid, y_valid, customer_ids, report_dir)
     print(table[["model", "average_precision", "precision", "recall", "f1", "accuracy",
                  "fit_seconds"]].to_string(index=False))
     print(decision)
+    return fitted[selected["model"]], report
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--compare", action="store_true", help="Run the part 3 comparison")
-    args = parser.parse_args()
+def load_training_data():
+    """Validate the source and recover the fixed allocations without resplitting."""
     df = pd.read_csv(PROJECT_ROOT / "data" / "raw" / "telco.csv")
     if not df["Churn"].isin(["No", "Yes"]).all():
         raise ValueError("Churn must contain only No and Yes.")
@@ -197,9 +198,24 @@ def main():
     X_train, X_valid = parse_features(train), parse_features(valid)
     y_train = train["Churn"].map({"No": 0, "Yes": 1})
     y_valid = valid["Churn"].map({"No": 0, "Yes": 1})
+    return X_train, y_train, X_valid, y_valid, valid["customerID"], report_dir
 
-    if args.compare:
-        compare_models(X_train, y_train, X_valid, y_valid, valid["customerID"], report_dir)
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--compare", action="store_true", help="Run the part 3 comparison")
+    parser.add_argument("--save", action="store_true", help="Compare, save and verify the winner")
+    args = parser.parse_args()
+    X_train, y_train, X_valid, y_valid, customer_ids, report_dir = load_training_data()
+
+    if args.compare or args.save:
+        selected, comparison = compare_models(
+            X_train, y_train, X_valid, y_valid, customer_ids, report_dir
+        )
+        if args.save:
+            from telco_churn.scripts.save_pipeline import save_and_verify
+
+            save_and_verify(selected, comparison, X_valid.head(5))
         return
 
     # One fit call learns imputation, scaling, encoding and the classifier from training only.
@@ -225,14 +241,14 @@ def main():
         "classifier": "LogisticRegression(max_iter=1000)",
         "positive_class": "Yes (1); No = 0",
         "confusion_matrix_order": "rows = actual, columns = predicted; labels = [0, 1]",
-        "split_sizes": {"train": len(train), "validation": len(valid)},
+        "split_sizes": {"train": len(X_train), "validation": len(X_valid)},
         "evaluation_split": "validation; test reserved and not evaluated",
         "metrics": metrics,
     }
     (report_dir / "pipeline_metrics.json").write_text(
         json.dumps(report, indent=2) + "\n", encoding="utf-8"
     )
-    valid[["customerID"]].assign(actual=y_valid, predicted=predicted).to_csv(
+    pd.DataFrame({"customerID": customer_ids, "actual": y_valid, "predicted": predicted}).to_csv(
         report_dir / "pipeline_validation_predictions.csv", index=False
     )
 
