@@ -182,3 +182,47 @@ changed, so they do not show that one algorithm is better than another.
 `reports/pipeline_metrics.json` records the configuration and metrics, and
 `reports/pipeline_validation_predictions.csv` holds the validation predictions.
 
+## TP02 milestone 3: compare models fairly
+
+Run the comparison using the same six features and saved customer allocations:
+
+```powershell
+uv run python -m telco_churn.scripts.train_pipeline --compare
+```
+
+Without `--compare`, the script still runs the part 2 logistic regression pipeline.
+Each comparison candidate gets fresh preprocessing fitted only on training data.
+The baseline always predicts the most frequent training class. Logistic regression
+provides a simple linear model, a depth-5 decision tree captures nonlinear rules,
+and a 100-tree random forest averages trees with depth limited to 8. Seeds are 42;
+full parameters and approximate pipeline fit times are recorded in the reports.
+
+The selection rule is fixed before evaluation: highest validation **average precision**
+among learned models. This measures churn ranking in an imbalanced dataset using
+class-1 probabilities rather than class predictions. Exact ties favor logistic
+regression, then the tree, then the forest. Precision, recall and F1 use the same
+probability threshold of 0.5, with undefined precision set to zero. The test set
+remains reserved. Fit timing is descriptive on this machine.
+
+| Model | Average precision | Precision | Recall | F1 | Accuracy |
+|---|---:|---:|---:|---:|---:|
+| Majority baseline | 0.2654 | 0.0000 | 0.0000 | 0.0000 | 0.7346 |
+| Logistic regression | 0.6475 | 0.6644 | 0.5294 | 0.5893 | 0.8041 |
+| Decision tree | 0.6173 | 0.6356 | 0.6016 | 0.6181 | 0.8027 |
+| Random forest | 0.6643 | 0.6569 | 0.4813 | 0.5556 | 0.7956 |
+
+Random forest is selected by the stated average-precision rule. Its higher ranking
+quality does not imply higher recall at threshold 0.5: the decision tree detects
+more churners at that threshold. This validation result does not establish that
+the small AP difference will hold on unseen data. Comparison with part 1 cannot
+isolate an algorithm improvement because the features also changed.
+
+Generated files under `reports/` (ignored by Git):
+
+- `model_comparison.csv`: metrics, confusion matrices, parameters and fit times.
+- `model_comparison.json`: results, metric definitions and selection policy.
+- `model_comparison_predictions.csv`: validation scores and predictions per model.
+- `model_selection.txt`: short validation-only selection decision.
+
+This milestone compares candidates; saving the fitted pipeline belongs to part 4.
+
