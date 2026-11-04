@@ -139,3 +139,46 @@ contains customer IDs, actual labels and both models' validation predictions.
 The original CSV remains unchanged. This milestone requires complete numeric
 values in its two inputs; preprocessing and the larger feature set come next.
 
+## TP02 milestone 2: preprocessing pipeline
+
+Milestone 1 must have produced `reports/customer_splits.csv`. Then run:
+
+```powershell
+uv run python -m telco_churn.scripts.train_pipeline
+```
+
+One `fit` call trains the preprocessing and a logistic regression on training
+customers only. Validation reuses the fitted transformations. The test set stays
+reserved. Pass inputs through `parse_features`, then to the pipeline:
+
+| Column | Input type | Preprocessing |
+|---|---|---|
+| `tenure`, `MonthlyCharges`, `TotalCharges` | number, or numeric text | Median imputation, then `StandardScaler` |
+| `Contract`, `InternetService`, `PaymentMethod` | text | Missing becomes `"missing"`, then `OneHotEncoder(handle_unknown="ignore")` |
+
+`parse_features` learns nothing from the data, and inference must apply the same
+rules:
+
+- **Blank `TotalCharges`:** whitespace-only values become missing.
+- **Malformed numbers:** any other non-numeric text raises a `ValueError`.
+- **Missing required column:** raises an error instead of predicting.
+- **Missing or unseen category:** encodes as all zeros for that feature. The model
+  still returns a prediction, which is not evidence that it is reliable for that
+  customer.
+
+The 11 blank `TotalCharges` values all belong to customers with `tenure` 0, 7 of
+them in training. Median imputation gives them the training median of 1373.625,
+far above what a new customer has been charged. This is a known simplification.
+
+Validation results on the original CSV (Churn = Yes is positive; rows are actual
+and columns are predicted, ordered `[No, Yes]`):
+
+| Model | Accuracy | Actual No: predicted No / Yes | Actual Yes: predicted No / Yes |
+|---|---:|---|---|
+| Six-feature logistic regression pipeline | 0.8041 | 935 / 100 | 176 / 198 |
+
+These results differ from milestone 1 because the features and preprocessing
+changed, so they do not show that one algorithm is better than another.
+`reports/pipeline_metrics.json` records the configuration and metrics, and
+`reports/pipeline_validation_predictions.csv` holds the validation predictions.
+
