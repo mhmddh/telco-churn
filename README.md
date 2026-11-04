@@ -273,3 +273,43 @@ code when loaded. Recreate the recorded environment with `uv sync --locked`;
 loading across library versions is not guaranteed to work. Keep the bundle intact
 when sharing it through the course's artifact submission location.
 
+## TP02 milestone 5: focused reliability checks
+
+After saving a trusted artifact with `--save`, run:
+
+```powershell
+uv run python -m telco_churn.scripts.check_pipeline
+```
+
+The script checks the existing artifact without retraining and prints one PASS per
+check. Failures raise an exception and exit unsuccessfully. Evidence is saved in
+`reports/reliability_checks.json`:
+
+1. All source customers have exactly one allocation; split IDs are disjoint and
+   match the saved metadata.
+2. Fitted numeric imputation medians and scaling means match training data.
+   Training medians are `[29.0, 70.55, 1373.625]`, whereas full-data medians are
+   `[29.0, 70.35, 1397.475]`, ordered tenure, MonthlyCharges, TotalCharges.
+3. Prediction leaves imputation, scaling and encoder statistics unchanged.
+4. A blank TotalCharges uses the fitted training median and permits prediction.
+5. An unseen Contract produces zeros for its one-hot block and permits prediction.
+   This supported behavior does not prove reliability for unfamiliar customers.
+6. Removing Contract raises a visible KeyError at the parsing boundary.
+7. Inference runs in a fresh process with fit calls and training-CSV access blocked.
+   Its label-free batch reproduces the original classes exactly and probabilities
+   within absolute tolerance `1e-12`, relative tolerance zero.
+
+The test set is not evaluated. Full-data statistics above are diagnostic evidence
+only; they do not influence fitting or model selection.
+
+### Peer reproduction (pending)
+
+Ask a classmate to follow this README to reproduce training or load the trusted
+artifact bundle, then record their actual feedback below. Automated checks do
+not replace this step.
+
+- Reviewer/date: pending
+- Command attempted and outcome: pending
+- Issue found: pending
+- Resolution and successful retry: pending
+
