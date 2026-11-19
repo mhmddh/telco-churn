@@ -313,3 +313,117 @@ not replace this step.
 - Issue found: pending
 - Resolution and successful retry: pending
 
+## TP03 part 2: track one candidate with MLflow
+
+Start the local tracking server in one terminal from the project root and leave it
+running:
+
+```powershell
+uv run mlflow server --host 127.0.0.1 --port 5000 --backend-store-uri sqlite:///mlflow.db --artifacts-destination ./mlartifacts
+```
+
+Then, in a second terminal, record one existing candidate run:
+
+```powershell
+uv run python -m telco_churn.scripts.train_pipeline --track logistic_regression
+```
+
+The client uses `http://127.0.0.1:5000` and the `telco-churn-tp03` experiment.
+It fits the complete six-feature pipeline only on TP02 training customers and
+evaluates only TP02 validation customers. The test set remains unused.
+
+Each tracked run contains estimator parameters, split seed and threshold;
+validation average precision, precision, recall, F1, accuracy and fit time; Git
+and source/allocation SHA-256 tags; validation confusion-matrix and provenance
+JSON artifacts; and training/validation dataset records. The dataset records
+describe the data schema and digest; they do not store the full training data.
+
+Open `http://127.0.0.1:5000`, select `telco-churn-tp03`, then open the printed
+run ID. Inspect **Parameters**, **Metrics**, **Tags**, **Artifacts**, and
+**Inputs**. An experiment groups related runs; a run records one training
+execution. The browser UI displays records sent by the training program—it does
+not execute model training itself.
+
+`mlflow.db` stores experiments, runs, parameters, metrics, tags and registry
+metadata. `mlartifacts/` stores logged files and, later, model artifacts. Both
+are local project storage and are intentionally ignored by Git.
+
+## TP03 part 3: compare candidate runs
+
+With the MLflow server still running, create three comparable tracked runs:
+
+```powershell
+uv run python -m telco_churn.scripts.train_pipeline --track-all
+```
+
+The command tracks logistic regression, a depth-limited decision tree and a
+depth-limited random forest. They all use the six TP02 features, the same saved
+customer allocation, training-only preprocessing and threshold 0.5. The test
+set remains reserved. Select the winner using validation average precision,
+which is fixed before comparison and computed from continuous class-1 scores.
+
+In MLflow's **Model training** view, select the three runs and use the comparison
+view or inspect their metric columns. Save a screenshot for the TP03 submission.
+The command also saves `reports/tp03_candidate_comparison.csv` and
+`reports/tp03_candidate_selection.md`, containing run IDs, validation results
+and the validation-only decision. A higher result on this single validation
+split is not proof of a statistically significant improvement.
+
+## TP03 part 4, step 1: log the selected fitted pipeline
+
+After `--track-all`, log the validation-selected pipeline in its corresponding
+MLflow source run:
+
+```powershell
+uv run python -m telco_churn.scripts.train_pipeline --log-selected-model
+```
+
+Before logging, the command refits the selected configuration only on the fixed
+training customers and verifies that its validation metrics reproduce the saved
+comparison. It then resumes the selected source run and logs the complete fitted
+scikit-learn pipeline as `churn_pipeline`. The model includes the imputer, scaler,
+one-hot encoder and random-forest classifier; no test data are used.
+
+The command prints a **source run ID** and a **logged model URI**. They identify
+different objects. It also writes `reports/tp03_model_handover.json`; model
+registration and the `candidate` alias are the next step.
+
+## TP03 part 4, step 2: register the selected model
+
+Register the logged model and assign its returned version the `candidate` alias:
+
+```powershell
+uv run python -m telco_churn.scripts.train_pipeline --register-selected-model
+```
+
+The command registers the logged model URI as `telco-churn`, records the actual
+version in `reports/tp03_model_handover.json`, then points
+`models:/telco-churn@candidate` to that version. The alias is a mutable pointer,
+not a copied model or a deployment. In the MLflow **Model training** view, open
+the registered model `telco-churn` and confirm its version and `candidate` alias.
+
+## TP03 part 4, step 3: load the alias in a fresh process
+
+Verify the registered alias in a separate Python process:
+
+```powershell
+uv run python -m telco_churn.scripts.train_pipeline --verify-registered-model
+```
+
+This writes a five-row, label-free feature batch and compares predictions from
+the original fitted pipeline with predictions from a child process that loads
+`models:/telco-churn@candidate`. Class predictions must match exactly; class-1
+probabilities use absolute tolerance `1e-12` and relative tolerance zero.
+
+For inference alone, without refitting or reading training data, use:
+
+```powershell
+uv run python -m telco_churn.scripts.predict_registered_model --input reports/tp03_inference_examples.csv --output reports/tp03_alias_predictions.csv
+```
+
+The input CSV must contain the six documented, unencoded columns and no `Churn`
+or `customerID`. The script calls `parse_features` for the same numeric parsing
+rules as TP02, then loads the alias and predicts. An already-loaded Python model
+does not change when the alias later moves; load it again to resolve the new alias
+target.
+

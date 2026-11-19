@@ -2,6 +2,10 @@
 /data/
 telco.csv
 /models/selected_pipeline/
+mlflow.db
+mlflow.db-*
+mlartifacts/
+mlruns/
 
 # Generated reports (keep directory placeholders)
 /reports/**

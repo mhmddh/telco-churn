@@ -1,8 +1,12 @@
 """TP02 milestones 2-4: train, compare and save complete sklearn pipelines."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
 from time import perf_counter
 
 import numpy as np
@@ -28,6 +32,8 @@ NUMERIC_FEATURES = ["tenure", "MonthlyCharges", "TotalCharges"]
 CATEGORICAL_FEATURES = ["Contract", "InternetService", "PaymentMethod"]
 FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 MISSING_CATEGORY = "missing"
+TRACKING_URI = "http://127.0.0.1:5000"
+EXPERIMENT_NAME = "telco-churn-tp03"
 
 
 def parse_features(df):
@@ -94,12 +100,9 @@ def evaluate_model(candidate, X_valid, y_valid):
     }, scores, predicted
 
 
-def compare_models(X_train, y_train, X_valid, y_valid, customer_ids, report_dir):
-    """Part 3: compare fresh pipelines without accessing test data."""
-    # Policy chosen before evaluation: highest validation AP among learned models.
-    # Exact ties favor the earlier, simpler model in this dictionary.
-    # AP measures churn ranking; class metrics use the same 0.5 threshold throughout.
-    models = {
+def candidate_classifiers():
+    """Return new, unfitted candidate estimators used by TP02 and TP03."""
+    return {
         "majority_baseline": DummyClassifier(strategy="most_frequent"),
         "logistic_regression": LogisticRegression(max_iter=1000, random_state=SEED),
         "decision_tree": DecisionTreeClassifier(
@@ -109,6 +112,270 @@ def compare_models(X_train, y_train, X_valid, y_valid, customer_ids, report_dir)
             n_estimators=100, max_depth=8, min_samples_leaf=5, random_state=SEED, n_jobs=1
         ),
     }
+
+
+def source_sha256(path):
+    """Return the SHA-256 fingerprint of an immutable source file."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def git_identity():
+    """Return the commit and whether tracked files were edited during this run."""
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, capture_output=True,
+            check=True, text=True
+        ).stdout.strip()
+        dirty = bool(subprocess.run(
+            ["git", "status", "--porcelain"], cwd=PROJECT_ROOT, capture_output=True,
+            check=True, text=True
+        ).stdout.strip())
+    except (OSError, subprocess.CalledProcessError):
+        return "unavailable", "unavailable"
+    return commit, str(dirty).lower()
+
+
+def track_candidate(name, classifier, train, valid, X_train, y_train, X_valid, y_valid):
+    """Fit and record one validation run with MLflow; test data is never loaded here."""
+    import mlflow
+
+    source = PROJECT_ROOT / "data" / "raw" / "telco.csv"
+    allocations = PROJECT_ROOT / "reports" / "customer_splits.csv"
+    commit, dirty = git_identity()
+    classifier_params = classifier.get_params()
+    # MLflow parameters are flat, so prefix estimator settings and record their actual values.
+    parameters = {
+        "model_type": type(classifier).__name__,
+        "split_seed": SEED,
+        "decision_threshold": 0.5,
+        **{f"estimator__{key}": str(value) for key, value in classifier_params.items()},
+    }
+    provenance = {
+        "source": {"path": "data/raw/telco.csv", "sha256": source_sha256(source)},
+        "customer_allocations": {"path": "reports/customer_splits.csv",
+                                 "sha256": source_sha256(allocations)},
+        "feature_roles": {"numeric": NUMERIC_FEATURES, "categorical": CATEGORICAL_FEATURES,
+                          "identifier_excluded": "customerID", "target_excluded": "Churn"},
+        "class_mapping": {"No": 0, "Yes": 1},
+        "evaluation": {
+            "split": "validation", "primary_metric": "average precision",
+            "scores": "predict_proba column associated with class 1", "threshold": 0.5,
+            "confusion_matrix_order": "rows actual; columns predicted; labels [0, 1]",
+            "test_set_evaluated": False,
+        },
+        "preprocessing": {
+            "numeric": "median imputation then StandardScaler",
+            "categorical": "constant 'missing' imputation then OneHotEncoder(handle_unknown='ignore')",
+            "unknown_category": "ignored by encoder",
+        },
+        "git": {"commit": commit, "working_tree_dirty": dirty},
+    }
+    mlflow.set_tracking_uri(TRACKING_URI)
+    mlflow.set_experiment(EXPERIMENT_NAME)
+    train_dataset = mlflow.data.from_pandas(train, name="telco_train", targets="Churn")
+    valid_dataset = mlflow.data.from_pandas(valid, name="telco_validation", targets="Churn")
+    with mlflow.start_run(run_name=f"{name}-tp03") as run:
+        mlflow.log_params(parameters)
+        mlflow.set_tags({
+            "candidate_name": name,
+            "run_purpose": "candidate_comparison",
+            "git_commit": commit,
+            "git_working_tree_dirty": dirty,
+            "data_sha256": provenance["source"]["sha256"],
+            "allocation_sha256": provenance["customer_allocations"]["sha256"],
+        })
+        mlflow.log_input(train_dataset, context="training")
+        mlflow.log_input(valid_dataset, context="validation")
+        candidate = build_pipeline(classifier)
+        start = perf_counter()
+        candidate.fit(X_train, y_train)
+        fit_seconds = perf_counter() - start
+        metrics, _, _ = evaluate_model(candidate, X_valid, y_valid)
+        mlflow.log_metrics({
+            **{f"val_{metric}": value for metric, value in metrics.items()
+               if metric != "confusion_matrix"},
+            "fit_seconds": fit_seconds,
+        })
+        with TemporaryDirectory() as temporary:
+            matrix_path = Path(temporary) / "validation_confusion_matrix.json"
+            matrix_path.write_text(json.dumps({
+                "labels": [0, 1], "rows": "actual", "columns": "predicted",
+                "matrix": metrics["confusion_matrix"],
+            }, indent=2) + "\n", encoding="utf-8")
+            mlflow.log_artifact(str(matrix_path))
+        mlflow.log_dict(provenance, "provenance.json")
+        print(f"Run ID: {run.info.run_id}")
+        print(f"Validation average precision: {metrics['average_precision']:.4f}")
+        return {"run_id": run.info.run_id, "candidate": name, "fit_seconds": fit_seconds, **metrics}
+
+
+def track_candidate_comparison(train, valid, X_train, y_train, X_valid, y_valid, report_dir):
+    """Create three fair MLflow candidate runs and save their validation-only decision."""
+    names = ["logistic_regression", "decision_tree", "random_forest"]
+    classifiers = candidate_classifiers()
+    records = [
+        track_candidate(name, classifiers[name], train, valid, X_train, y_train, X_valid, y_valid)
+        for name in names
+    ]
+    selected = max(records, key=lambda record: record["average_precision"])
+    table = pd.DataFrame(records)
+    table["decision"] = "not selected"
+    table.loc[table["run_id"] == selected["run_id"], "decision"] = "selected: highest validation AP"
+    table.to_csv(report_dir / "tp03_candidate_comparison.csv", index=False)
+    selection = (
+        f"Selected {selected['candidate']} (run {selected['run_id']}) because its validation "
+        f"average precision was highest at {selected['average_precision']:.4f}. "
+        "All candidates used the same six features, saved customer allocation, validation "
+        "population and threshold 0.5. The test set was not evaluated. This single validation "
+        "split does not establish a statistically significant difference."
+    )
+    (report_dir / "tp03_candidate_selection.md").write_text(
+        "# TP03 candidate selection\n\n" + selection + "\n", encoding="utf-8"
+    )
+    print("\nMLflow candidate comparison:")
+    print(table[["candidate", "run_id", "average_precision", "recall", "f1", "decision"]]
+          .to_string(index=False))
+    print(selection)
+    return selected
+
+
+def log_selected_model(X_train, y_train, X_valid, y_valid, report_dir):
+    """Log the fitted selected TP03 candidate in the exact MLflow run that selected it."""
+    import mlflow
+    import mlflow.sklearn
+
+    comparison_path = report_dir / "tp03_candidate_comparison.csv"
+    if not comparison_path.exists():
+        raise FileNotFoundError("Run --track-all before logging the selected model.")
+    comparison = pd.read_csv(comparison_path)
+    selected_rows = comparison.loc[
+        comparison["decision"].eq("selected: highest validation AP")
+    ]
+    if len(selected_rows) != 1:
+        raise ValueError("Comparison must contain exactly one selected candidate.")
+    selected = selected_rows.iloc[0]
+    name, run_id = selected["candidate"], selected["run_id"]
+    classifier = candidate_classifiers()[name]
+    candidate = build_pipeline(classifier)
+    candidate.fit(X_train, y_train)
+    metrics, _, _ = evaluate_model(candidate, X_valid, y_valid)
+    for metric in ["average_precision", "precision", "recall", "f1", "accuracy"]:
+        np.testing.assert_allclose(metrics[metric], selected[metric], rtol=0, atol=1e-12)
+
+    mlflow.set_tracking_uri(TRACKING_URI)
+    existing_run = mlflow.MlflowClient().get_run(run_id)
+    if existing_run.data.tags.get("candidate_name") != name:
+        raise ValueError("Selected comparison row does not match the source MLflow run.")
+    # Resume this exact source run: the freshly fitted pipeline is verified above to
+    # reproduce its stored validation metrics before model logging happens.
+    with mlflow.start_run(run_id=run_id):
+        model_info = mlflow.sklearn.log_model(
+            sk_model=candidate,
+            name="churn_pipeline",
+            input_example=X_train.head(3),
+            serialization_format="cloudpickle",
+        )
+        mlflow.set_tags({"logged_model_name": "churn_pipeline", "model_logged": "true"})
+    handover = {
+        "selected_candidate": name,
+        "source_run_id": run_id,
+        "model_uri": model_info.model_uri,
+        "input_example": "first three typed, unencoded training feature rows",
+        "input_columns": FEATURES,
+        "class_mapping": {"No": 0, "Yes": 1},
+        "threshold": 0.5,
+        "selection_metric": "validation average precision",
+        "validation_metrics_reproduced_before_logging": metrics,
+        "registered_model": None,
+        "alias": None,
+    }
+    handover_path = report_dir / "tp03_model_handover.json"
+    handover_path.write_text(json.dumps(handover, indent=2) + "\n", encoding="utf-8")
+    print(f"Source run ID: {run_id}")
+    print(f"Logged model URI: {model_info.model_uri}")
+    print(f"Handover record: {handover_path}")
+    return handover
+
+
+def register_selected_model(report_dir):
+    """Register the logged selected model and point the candidate alias at its version."""
+    import mlflow
+
+    handover_path = report_dir / "tp03_model_handover.json"
+    if not handover_path.exists():
+        raise FileNotFoundError("Run --log-selected-model before model registration.")
+    handover = json.loads(handover_path.read_text(encoding="utf-8"))
+    model_uri = handover["model_uri"]
+    registered_name = "telco-churn"
+    mlflow.set_tracking_uri(TRACKING_URI)
+    client = mlflow.MlflowClient()
+    existing = handover.get("registered_model")
+    if existing and existing.get("name") == registered_name:
+        version = client.get_model_version(registered_name, existing["version"])
+        if version.source != model_uri:
+            raise ValueError("Handover version does not point to the recorded logged model URI.")
+    else:
+        version = mlflow.register_model(model_uri, registered_name)
+    client.set_registered_model_alias(registered_name, "candidate", version.version)
+    handover["registered_model"] = {"name": registered_name, "version": version.version}
+    handover["alias"] = {"name": "candidate", "uri": f"models:/{registered_name}@candidate"}
+    handover_path.write_text(json.dumps(handover, indent=2) + "\n", encoding="utf-8")
+    print(f"Registered model: {registered_name}")
+    print(f"Registered version: {version.version}")
+    print(f"Alias URI: models:/{registered_name}@candidate")
+    return handover
+
+
+def verify_registered_model(X_train, y_train, X_valid, report_dir):
+    """Compare original scores with alias inference in a separate Python process."""
+    handover_path = report_dir / "tp03_model_handover.json"
+    if not handover_path.exists():
+        raise FileNotFoundError("Run --register-selected-model before alias verification.")
+    handover = json.loads(handover_path.read_text(encoding="utf-8"))
+    alias = handover.get("alias")
+    if not alias:
+        raise ValueError("No registered model alias is recorded in the handover file.")
+    classifier = candidate_classifiers()[handover["selected_candidate"]]
+    original_pipeline = build_pipeline(classifier).fit(X_train, y_train)
+    examples = X_valid.head(5).copy()
+    positive_column = list(original_pipeline.classes_).index(1)
+    original_scores = original_pipeline.predict_proba(examples)[:, positive_column]
+    original = pd.DataFrame({
+        "score": original_scores, "predicted": (original_scores >= 0.5).astype(int),
+    })
+    examples_path = report_dir / "tp03_inference_examples.csv"
+    original_path = report_dir / "tp03_original_predictions.csv"
+    reloaded_path = report_dir / "tp03_alias_predictions.csv"
+    examples.to_csv(examples_path, index=False)
+    original.to_csv(original_path, index=False)
+    # The child command imports no training entry point, calls no fit method and has no labels.
+    subprocess.run([
+        sys.executable, "-m", "telco_churn.scripts.predict_registered_model",
+        "--model-uri", alias["uri"], "--input", str(examples_path), "--output", str(reloaded_path),
+    ], cwd=PROJECT_ROOT, check=True)
+    reloaded = pd.read_csv(reloaded_path)
+    np.testing.assert_array_equal(original["predicted"], reloaded["predicted"])
+    np.testing.assert_allclose(original["score"], reloaded["score"], rtol=0, atol=1e-12)
+    max_difference = float(np.max(np.abs(original["score"] - reloaded["score"])))
+    handover["fresh_process_check"] = {
+        "command": "uv run python -m telco_churn.scripts.predict_registered_model "
+                   "--input reports/tp03_inference_examples.csv "
+                   "--output reports/tp03_alias_predictions.csv",
+        "examples": len(examples), "labels_provided": False, "fit_called": False,
+        "class_predictions_equal": True, "probability_atol": 1e-12,
+        "probability_rtol": 0, "max_probability_difference": max_difference,
+    }
+    handover_path.write_text(json.dumps(handover, indent=2) + "\n", encoding="utf-8")
+    print("Fresh-process alias load verified: equal classes; probabilities agree within 1e-12.")
+    return handover
+
+
+def compare_models(X_train, y_train, X_valid, y_valid, customer_ids, report_dir):
+    """Part 3: compare fresh pipelines without accessing test data."""
+    # Policy chosen before evaluation: highest validation AP among learned models.
+    # Exact ties favor the earlier, simpler model in this dictionary.
+    # AP measures churn ranking; class metrics use the same 0.5 threshold throughout.
+    models = candidate_classifiers()
     results = []
     fitted = {}
     predictions = pd.DataFrame({"customerID": customer_ids, "actual": y_valid})
@@ -198,15 +465,62 @@ def load_training_data():
     X_train, X_valid = parse_features(train), parse_features(valid)
     y_train = train["Churn"].map({"No": 0, "Yes": 1})
     y_valid = valid["Churn"].map({"No": 0, "Yes": 1})
-    return X_train, y_train, X_valid, y_valid, valid["customerID"], report_dir
+    return X_train, y_train, X_valid, y_valid, valid["customerID"], report_dir, train, valid
 
 
 def main():
+    # MLflow 3 prints a Unicode run link when it closes a run. Use UTF-8 on Windows
+    # terminals so that display-only message cannot turn a successful run into an error.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compare", action="store_true", help="Run the part 3 comparison")
     parser.add_argument("--save", action="store_true", help="Compare, save and verify the winner")
+    parser.add_argument(
+        "--track", choices=candidate_classifiers().keys(),
+        help="Track one candidate in MLflow for TP03 parts 2 and 3",
+    )
+    parser.add_argument(
+        "--track-all", action="store_true",
+        help="Track the three learned candidate configurations for TP03 part 3",
+    )
+    parser.add_argument(
+        "--log-selected-model", action="store_true",
+        help="Log the selected pipeline in its source MLflow run for TP03 part 4",
+    )
+    parser.add_argument(
+        "--register-selected-model", action="store_true",
+        help="Register the logged selected model and assign the candidate alias",
+    )
+    parser.add_argument(
+        "--verify-registered-model", action="store_true",
+        help="Load the candidate alias in a new process and compare predictions",
+    )
     args = parser.parse_args()
-    X_train, y_train, X_valid, y_valid, customer_ids, report_dir = load_training_data()
+    X_train, y_train, X_valid, y_valid, customer_ids, report_dir, train, valid = load_training_data()
+
+    if args.track:
+        track_candidate(
+            args.track, candidate_classifiers()[args.track], train, valid,
+            X_train, y_train, X_valid, y_valid,
+        )
+        return
+
+    if args.track_all:
+        track_candidate_comparison(train, valid, X_train, y_train, X_valid, y_valid, report_dir)
+        return
+
+    if args.log_selected_model:
+        log_selected_model(X_train, y_train, X_valid, y_valid, report_dir)
+        return
+
+    if args.register_selected_model:
+        register_selected_model(report_dir)
+        return
+
+    if args.verify_registered_model:
+        verify_registered_model(X_train, y_train, X_valid, report_dir)
+        return
 
     if args.compare or args.save:
         selected, comparison = compare_models(
