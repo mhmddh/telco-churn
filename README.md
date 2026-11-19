@@ -427,3 +427,32 @@ rules as TP02, then loads the alias and predicts. An already-loaded Python model
 does not change when the alias later moves; load it again to resolve the new alias
 target.
 
+## TP03 part 5: restart and verify persistence
+
+In the terminal running the MLflow server, press `Ctrl+C`. Do not delete
+`mlflow.db` or `mlartifacts/`. From the same project root, start the server again:
+
+```powershell
+uv run mlflow server --host 127.0.0.1 --port 5000 --backend-store-uri sqlite:///mlflow.db --artifacts-destination ./mlartifacts
+```
+
+In a second terminal, verify persistence and inference after the restart:
+
+```powershell
+uv run python -m telco_churn.scripts.verify_mlflow_persistence --after-restart
+```
+
+The command checks that `telco-churn-tp03`, the selected source run,
+`telco-churn` version 1 and alias `candidate` remain available. It loads the alias
+in a fresh inference process and compares the predictions with the recorded
+original predictions. Evidence is saved in `reports/tp03_persistence_check.json`.
+It also creates `reports/tp03_summary.md`; add the three screenshot filenames
+before submitting it.
+
+`mlflow.db` holds metadata such as runs, metrics, tags, inputs, registered model
+versions and aliases. `mlartifacts/` holds model files and logged artifacts. A
+database without artifacts leaves model metadata but not a loadable model; model
+files without the database lose the run and registry/alias relationships. Another
+machine needs a compatible environment and project package plus access to shared
+or exported metadata and artifacts; a local MLflow URI alone is insufficient.
+
